@@ -1,0 +1,51 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:routeresq_db}
+    username: ${DB_USER:routeresq_user}
+    password: ${DB_PASSWORD:routeresq_password}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.spatial.dialect.postgis.PostgisDialect
+        format_sql: true
+    show-sql: false
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+# Timefold Solver Configuration
+timefold:
+  solver:
+    termination:
+      spent-limit: 10s
+
+# Security JWT Settings
+routeresq:
+  jwt:
+    secret: ${JWT_SECRET:super-secret-key-that-is-at-least-256-bits-long-for-hmac-sha-256-security-routeresq-2026}
+    expiration-ms: ${JWT_EXPIRATION_MS:900000}
+    refresh-expiration-ms: ${JWT_REFRESH_EXPIRATION_MS:604800000}
+
+# Actuator Observability
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    root: INFO
+    com.routeresq: DEBUG
+    ai.timefold.solver: INFO

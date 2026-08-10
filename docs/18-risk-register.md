@@ -1,0 +1,9 @@
+# Risk Register & Mitigation Strategies
+
+| Risk ID | Title / Category | Likelihood | Impact | Mitigation Strategy | Fallback Plan |
+|---|---|---|---|---|---|
+| **RSK-01** | **Solver Timeout / Infeasibility** <br> *(Optimization)* | Medium | High | Enforce strict max solve duration (e.g. 10s). Configure construction heuristic (`FIRST_FIT_DECREASING`) to quickly produce an initial feasible solution before local search. | Return best feasible solution found prior to timeout; mark late windows as soft warnings if hard solve fails. |
+| **RSK-02** | **Route Instability / Disruption** <br> *(Operations)* | High | Medium | Implement `S4: Route Disruption Penalty` soft constraint in Timefold model to penalize un-forced sequence changes during mid-day re-optimization. | Lock all in-progress and completed route stops before invoking re-solver. |
+| **RSK-03** | **Geospatial Distance Matrix Overhead** <br> *(Performance)* | Medium | Medium | Cache $N \times N$ distance matrices in Redis using spatial hash keys `(lat1,lon1)-(lat2,lon2)`. | Fallback to in-memory fast `HaversineRoutingProvider` for distance matrix generation. |
+| **RSK-04** | **WebSocket Connection Drops** <br> *(Real-time)* | Medium | Low | Configure STOMP automatic client reconnection with exponential backoff and heartbeat checks (10s). | Frontend falls back to HTTP REST polling `/api/v1/routes` every 5s if WebSocket disconnects. |
+| **RSK-05** | **Memory Starvation under Large Solve Jobs** <br> *(Infrastructure)* | Low | High | Configure JVM heap limit (`-Xmx2g`) in Docker Compose; bound max orders per single solve job to 500. | Throw validated HTTP 400 `ORDER_LIMIT_EXCEEDED` if batch exceeds 500 orders; recommend multi-depot splitting. |
