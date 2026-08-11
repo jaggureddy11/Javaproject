@@ -25,4 +25,8 @@ export const driverApi = {
   async delete(id: string): Promise<void> {
     await apiClient.delete(`/drivers/${id}`);
   },
+
+  async getAll(params: { size?: number } = {}): Promise<PageResponse<Driver>> {
+    return driverApi.list(undefined, 0, params.size ?? 50);
+  },
 };

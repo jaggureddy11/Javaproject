@@ -5,8 +5,8 @@ export const ROUTE_COLORS = [
   '#a855f7', // purple
   '#f59e0b', // amber
   '#ec4899', // pink
-  '#22d3ee', // cyan
-  '#84cc16', // lime
+  '#0891b2', // deeper cyan (matches --route-5)
+  '#65a30d', // olive-green (matches --route-6)
   '#f97316', // orange
 ];
 

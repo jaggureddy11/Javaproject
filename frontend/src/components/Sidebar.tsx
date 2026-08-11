@@ -1,8 +1,8 @@
 // ─── Left sidebar: Fleet, Orders, Benchmark tabs ──────────
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Route, Package, BarChart2, RefreshCw, ChevronDown, ChevronRight,
-  Clock, Weight, AlertCircle, CheckCircle,
+  Clock, Weight, AlertCircle, CheckCircle, Plus,
 } from 'lucide-react';
 import { Order, Vehicle } from '../types/domain';
 import { OptimizationRunResponse, RouteResultDto } from '../types/optimization';
@@ -10,6 +10,7 @@ import { BenchmarkResult } from '../types/benchmark';
 import { orderApi } from '../api/orderApi';
 import { vehicleApi } from '../api/vehicleApi';
 import { benchmarkApi } from '../api/benchmarkApi';
+import OrderForm from './OrderForm';
 import {
   routeColor, fmtMinutes, fmtKm, fmtDuration,
   improvementClass, orderStatusColor, priorityColor,
@@ -27,6 +28,34 @@ interface SidebarProps {
   onOrdersLoaded: (orders: Order[]) => void;
 }
 
+// ── Live clock for ETA comparison ──────────────────────────
+function useNowMinutes() {
+  const [now, setNow] = useState(() => {
+    const d = new Date();
+    return d.getHours() * 60 + d.getMinutes();
+  });
+  useEffect(() => {
+    const t = setInterval(() => {
+      const d = new Date();
+      setNow(d.getHours() * 60 + d.getMinutes());
+    }, 30_000);
+    return () => clearInterval(t);
+  }, []);
+  return now;
+}
+
+// ── ETA colour based on lateness ──────────────────────────
+function etaColor(etaMinutes: number | undefined, windowEnd: number | undefined, currentMinutes: number): string {
+  if (etaMinutes == null || windowEnd == null) return 'var(--text-dim)';
+  // Already past window end
+  if (currentMinutes > windowEnd) return 'var(--accent-red)';
+  // ETA itself is after the window end
+  if (etaMinutes > windowEnd) return 'var(--accent-red)';
+  // ETA is within 15 min of window close
+  if (windowEnd - etaMinutes < 15) return 'var(--accent-amber)';
+  return 'var(--accent-green)';
+}
+
 const Sidebar: React.FC<SidebarProps> = ({
   optimizationResult,
   selectedRouteId,
@@ -42,33 +71,50 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([]);
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
   const [ordersLoading, setOrdersLoading] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [showOrderForm, setShowOrderForm] = useState(false);
   const { addToast } = useToast();
+  const nowMinutes = useNowMinutes();
+  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const loadOrders = useCallback(async () => {
-    setOrdersLoading(true);
+  const loadOrders = useCallback(async (silent = false) => {
+    if (!silent) setOrdersLoading(true);
     try {
       const page = await orderApi.getAll({ size: 200 });
       setOrders(page.content);
       onOrdersLoaded(page.content);
+      setLastRefresh(new Date());
     } catch {
-      addToast('error', 'Failed to load orders');
+      if (!silent) addToast('error', 'Failed to load orders');
     } finally {
-      setOrdersLoading(false);
+      if (!silent) setOrdersLoading(false);
     }
   }, [addToast, onOrdersLoaded]);
 
-  const loadVehicles = useCallback(async () => {
+  const loadVehicles = useCallback(async (silent = false) => {
     try {
       const page = await vehicleApi.getAll({ size: 100 });
       setVehicles(page.content);
     } catch {
-      addToast('error', 'Failed to load vehicles');
+      if (!silent) addToast('error', 'Failed to load vehicles');
     }
   }, [addToast]);
 
+  // Initial load
   useEffect(() => {
     loadOrders();
     loadVehicles();
+  }, [loadOrders, loadVehicles]);
+
+  // ── 15-second auto-refresh ─────────────────────────────
+  useEffect(() => {
+    autoRefreshRef.current = setInterval(() => {
+      loadOrders(true);
+      loadVehicles(true);
+    }, 15_000);
+    return () => {
+      if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
+    };
   }, [loadOrders, loadVehicles]);
 
   const runBenchmarks = async () => {
@@ -88,8 +134,17 @@ const Sidebar: React.FC<SidebarProps> = ({
     if (results.length > 0) addToast('success', `${results.length} benchmarks completed`);
   };
 
+  const handleOrderCreated = (order: Order) => {
+    const updated = [order, ...orders];
+    setOrders(updated);
+    onOrdersLoaded(updated);
+  };
+
   const routes = optimizationResult?.routes ?? [];
   const metrics = optimizationResult?.metrics;
+
+  // Build order lookup for ETA checking
+  const orderById = new Map(orders.map(o => [o.id, o]));
 
   // ── Fleet tab ─────────────────────────────────────────────
   const renderFleet = () => (
@@ -177,25 +232,30 @@ const Sidebar: React.FC<SidebarProps> = ({
               </div>
               <div className="route-item-body">
                 <div className="stop-list">
-                  {route.stops.map(stop => (
-                    <div
-                      key={stop.stopId}
-                      className="stop-row"
-                      onClick={e => { e.stopPropagation(); onSelectOrder(stop.orderId); }}
-                    >
-                      <span className="stop-seq">{stop.sequenceNumber}.</span>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="truncate" style={{ fontSize: 11, color: 'var(--text-main)' }}>
-                          {stop.customerName}
-                        </div>
-                        {stop.estimatedArrivalMinutes != null && (
-                          <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-                            ETA {fmtMinutes(stop.estimatedArrivalMinutes)}
+                  {route.stops.map(stop => {
+                    const order = orderById.get(stop.orderId);
+                    const etaCol = etaColor(stop.estimatedArrivalMinutes, order?.windowEndMinutes, nowMinutes);
+                    return (
+                      <div
+                        key={stop.stopId}
+                        className="stop-row"
+                        onClick={e => { e.stopPropagation(); onSelectOrder(stop.orderId); }}
+                      >
+                        <span className="stop-seq">{stop.sequenceNumber}.</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div className="truncate" style={{ fontSize: 11, color: 'var(--text-main)' }}>
+                            {stop.customerName}
                           </div>
-                        )}
+                          {stop.estimatedArrivalMinutes != null && (
+                            <div style={{ fontSize: 10, color: etaCol, fontFamily: 'JetBrains Mono, monospace' }}>
+                              ETA {fmtMinutes(stop.estimatedArrivalMinutes)}
+                              {order?.windowEndMinutes != null && ` / ${fmtMinutes(order.windowEndMinutes)}`}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>
@@ -203,11 +263,14 @@ const Sidebar: React.FC<SidebarProps> = ({
         })
       )}
 
-      {/* Idle vehicles */}
+      {/* Fleet status */}
       {vehicles.length > 0 && (
         <div className="card">
           <div className="card-header">
             <span className="card-title">Fleet Status</span>
+            <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+              {lastRefresh ? `Updated ${lastRefresh.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}` : ''}
+            </span>
           </div>
           <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {vehicles.map(v => (
@@ -221,6 +284,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                   background: v.status === 'EN_ROUTE' ? 'var(--accent-blue)'
                     : v.status === 'IDLE' ? 'var(--accent-green)'
                     : 'var(--text-dim)',
+                  ...(v.status === 'EN_ROUTE' ? { animation: 'glow-pulse 2s infinite' } : {}),
                 }} />
                 <span style={{ flex: 1, fontSize: 12, fontFamily: 'JetBrains Mono, monospace' }} className="truncate">
                   {v.vehicleCode}
@@ -239,18 +303,28 @@ const Sidebar: React.FC<SidebarProps> = ({
     <>
       <div className="flex-between" style={{ padding: '4px 2px' }}>
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          {orders.length} orders total
+          {orders.length} orders
         </span>
-        <button className="btn-icon" onClick={loadOrders} title="Refresh">
-          {ordersLoading ? <div className="spinner" /> : <RefreshCw size={13} />}
-        </button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            className="btn btn-primary"
+            onClick={() => setShowOrderForm(true)}
+            title="New Order"
+            style={{ padding: '5px 10px', fontSize: 11, gap: 4 }}
+          >
+            <Plus size={12} /> New
+          </button>
+          <button className="btn-icon" onClick={() => loadOrders()} title="Refresh">
+            {ordersLoading ? <div className="spinner" /> : <RefreshCw size={13} />}
+          </button>
+        </div>
       </div>
 
       {orders.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--text-dim)' }}>
           <Package size={28} style={{ margin: '0 auto 10px', opacity: 0.3 }} />
           <p style={{ fontSize: 12, fontWeight: 600 }}>No orders found</p>
-          <p style={{ fontSize: 11, marginTop: 4 }}>Seed data or create orders via API</p>
+          <p style={{ fontSize: 11, marginTop: 4 }}>Seed data or create an order above</p>
         </div>
       ) : (
         orders.map(order => {
@@ -347,7 +421,6 @@ const Sidebar: React.FC<SidebarProps> = ({
             </table>
           </div>
 
-          {/* SLA summary */}
           <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: 6 }}>
             {benchmarkResults.map(r => (
               <div key={r.dataset} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
@@ -355,9 +428,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                   ? <CheckCircle size={12} style={{ color: 'var(--accent-green)', flexShrink: 0 }} />
                   : <AlertCircle size={12} style={{ color: 'var(--accent-amber)', flexShrink: 0 }} />
                 }
-                <span style={{ color: 'var(--text-muted)' }}>
-                  {r.dataset.replace(/_/g, ' ')}
-                </span>
+                <span style={{ color: 'var(--text-muted)' }}>{r.dataset.replace(/_/g, ' ')}</span>
                 <span style={{ marginLeft: 'auto', color: 'var(--text-dim)' }}>
                   {r.optimized.lateDeliveries === 0 ? 'SLA ✓' : `${r.optimized.lateDeliveries} late`}
                 </span>
@@ -367,12 +438,12 @@ const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
 
-      {/* Stat cards */}
       {benchmarkResults.length > 0 && (() => {
         const best = benchmarkResults.reduce((a, b) =>
           a.improvement.distanceImprovementPercent > b.improvement.distanceImprovementPercent ? a : b
         );
-        const avgImprovement = benchmarkResults.reduce((s, r) => s + r.improvement.distanceImprovementPercent, 0) / benchmarkResults.length;
+        const avgImprovement = benchmarkResults.reduce((s, r) =>
+          s + r.improvement.distanceImprovementPercent, 0) / benchmarkResults.length;
         return (
           <div className="kpi-grid">
             <div className="kpi-cell">
@@ -384,8 +455,7 @@ const Sidebar: React.FC<SidebarProps> = ({
             </div>
             <div className="kpi-cell">
               <span className="kpi-value" style={{
-                color: avgImprovement > 0 ? 'var(--accent-green)' : 'var(--accent-red)',
-                fontSize: 18,
+                color: avgImprovement > 0 ? 'var(--accent-green)' : 'var(--accent-red)', fontSize: 18,
               }}>
                 {avgImprovement > 0 ? '+' : ''}{avgImprovement.toFixed(1)}%
               </span>
@@ -399,42 +469,40 @@ const Sidebar: React.FC<SidebarProps> = ({
   );
 
   return (
-    <aside className="sidebar">
-      {/* Tabs */}
-      <div className="sidebar-tabs">
-        <button
-          className={`sidebar-tab ${tab === 'fleet' ? 'active' : ''}`}
-          onClick={() => setTab('fleet')}
-          id="tab-fleet"
-        >
-          <Route size={14} />
-          Fleet
-        </button>
-        <button
-          className={`sidebar-tab ${tab === 'orders' ? 'active' : ''}`}
-          onClick={() => setTab('orders')}
-          id="tab-orders"
-        >
-          <Package size={14} />
-          Orders
-        </button>
-        <button
-          className={`sidebar-tab ${tab === 'benchmark' ? 'active' : ''}`}
-          onClick={() => setTab('benchmark')}
-          id="tab-benchmark"
-        >
-          <BarChart2 size={14} />
-          Bench
-        </button>
-      </div>
+    <>
+      <aside className="sidebar">
+        {/* Tabs */}
+        <div className="sidebar-tabs">
+          <button className={`sidebar-tab ${tab === 'fleet' ? 'active' : ''}`}
+            onClick={() => setTab('fleet')} id="tab-fleet">
+            <Route size={14} />Fleet
+          </button>
+          <button className={`sidebar-tab ${tab === 'orders' ? 'active' : ''}`}
+            onClick={() => setTab('orders')} id="tab-orders">
+            <Package size={14} />Orders
+          </button>
+          <button className={`sidebar-tab ${tab === 'benchmark' ? 'active' : ''}`}
+            onClick={() => setTab('benchmark')} id="tab-benchmark">
+            <BarChart2 size={14} />Bench
+          </button>
+        </div>
 
-      {/* Content */}
-      <div className="sidebar-content">
-        {tab === 'fleet' && renderFleet()}
-        {tab === 'orders' && renderOrders()}
-        {tab === 'benchmark' && renderBenchmark()}
-      </div>
-    </aside>
+        {/* Content */}
+        <div className="sidebar-content">
+          {tab === 'fleet' && renderFleet()}
+          {tab === 'orders' && renderOrders()}
+          {tab === 'benchmark' && renderBenchmark()}
+        </div>
+      </aside>
+
+      {/* Order creation modal */}
+      {showOrderForm && (
+        <OrderForm
+          onClose={() => setShowOrderForm(false)}
+          onCreated={handleOrderCreated}
+        />
+      )}
+    </>
   );
 };
 

@@ -90,30 +90,66 @@
 
 ---
 
-### Checkpoint 7: Interactive Map & Dashboard UI
+### Checkpoint 7: Interactive Map & Logistics Operations Control Center
 - **Status**: COMPLETED
-- **Date**: 2026-08-11
+- **Date**: 2026-08-12
 - **Deliverables**:
-  - Complete dark-mode design system CSS (`index.css`) with CSS custom property tokens, Leaflet dark overrides, route colours, KPI grid, route/stop list, sidebar tabs, buttons, form elements, toasts, legend, spinner, progress bars, and scrollbar styling.
-  - `ToastContext.tsx` — global notification context (success / error / info / warning toasts with auto-dismiss).
-  - `utils/display.ts` — shared formatting utilities: `routeColor()`, `fmtMinutes()`, `fmtKm()`, `fmtDuration()`, `improvementClass()`, `orderStatusColor()`, `priorityColor()`.
-  - `Header.tsx` — top bar with logo, live-dot solver status indicator, order count badge, route count badge.
-  - `Sidebar.tsx` — left sidebar with 3 tabs: **Fleet** (optimization metrics KPI grid, route stop list, fleet status), **Orders** (paginated order list with priority badge, time window, weight, status), **Benchmark** (run benchmarks in-browser, results table with Δ% coloured improvement, SLA summary).
-  - `SolvePanel.tsx` — map overlay top-right control panel: depot dropdown, solve-time slider (5–60 s), animated progress bar, Run Optimization button.
-  - `MapView.tsx` — interactive Leaflet map: dark tile layer, custom depot SVG markers, order circle markers coloured by route assignment / priority, route polylines with selection dimming, auto-fit bounds to order+depot extent, rich Popup HTML.
-  - `MapLegend.tsx` — map overlay bottom-left clickable legend: route colour swatch, vehicle code, distance, stop count, show-all reset.
-  - `App.tsx` — full application shell: ToastProvider wrapper, Header, Sidebar, MapView, SolvePanel, MapLegend, HardScore badge overlay, empty-state and "orders loaded" status bar.
-  - API client convenience aliases: `getAll()` on `depotApi`, `vehicleApi`, `orderApi`; `run()` on `benchmarkApi`.
-  - Verification: `npm run build` → `BUILD SUCCESS` (1614 modules, 384 kB JS, 27 kB CSS gzip: 120 kB / 9 kB); `npm run dev` → Vite ready at http://localhost:3000.
+  - `docs/checkpoint-7-gap-analysis.md` created documenting pre-existing work, missing requirements, and root causes.
+  - Complete Application Shell (`Header.tsx` & `App.tsx`) with seamless navigation tabs across 8 operational views (`overview`, `map`, `orders`, `fleet`, `routes`, `optimization`, `incidents`, `benchmarks`) and RBAC control filtering (`ADMIN`, `DISPATCHER`, `DRIVER`).
+  - `OverviewView.tsx` — Operations Control Center dashboard with real KPI metrics (orders count, status breakdown, active vehicles, on-time rate %, planned routes, solver state, and Actuator system health).
+  - `MapView.tsx` — Enhanced map-first GIS view with dynamic `SelectionFitter` (auto-focuses map on selected route or order), custom depot SVG markers, priority-colored order markers, route polylines, map legend, and `"Route geometry: estimated (Haversine)"` overlay badge.
+  - `RoutesView.tsx` — Dedicated route inspector displaying planned route metadata and sequential stop timeline (`DEPOT (08:00) -> STOP #1 (08:14) -> STOP #2 (08:26) -> DEPOT (09:02)`) with delivery window SLA status pills.
+  - `OrdersView.tsx` — Dedicated orders management table with multi-attribute search, status filter, priority filter, column sorting, pagination, order detail drawer, and order cancellation.
+  - `FleetView.tsx` — Dedicated fleet management view with sub-tabs for Vehicles, Drivers, and Depots displaying status badges, driver assignments, shift schedules, and capacities.
+  - `OptimizationView.tsx` — VRPTW Solver Operations Center supporting async solve (`202 Accepted`), STOMP progress updates, post-solve metrics summary (Hard/Soft score, total distance, duration, assigned count), and honest Infeasible / Failed card handling.
+  - `IncidentsView.tsx` & Backend Incident API (`IncidentController.java`, `IncidentService.java`, `IncidentResponse.java`, `CreateIncidentRequest.java`, `incidentApi.ts`) — Disruption tracking table, type/status filters, and report incident modal (ready for Checkpoint 9 dynamic re-optimization).
+  - `BenchmarkView.tsx` — Empirical benchmark suite executing all 6 standard datasets (`SMALL`, `MEDIUM`, `LARGE`, `SPATIAL_CLUSTERING`, `TIGHT_TIME_WINDOWS`, `CAPACITY_PRESSURE`), baseline vs Timefold comparison table, honest metric representation, and SVG distance comparison bar charts.
+  - Verification: `npx tsc --noEmit` -> 0 errors; `npm run build` -> `built in 3.74s` (1746 modules); `mvn test` -> `BUILD SUCCESS` (35 tests evaluated across backend unit/integration suite).
+
+---
+
+### Checkpoint 8: Real-Time Delivery Simulation Engine
+- **Status**: COMPLETED
+- **Date**: 2026-08-12
+- **Deliverables**:
+  - `docs/checkpoint-8-plan.md` created detailing problem, backend-driven architecture, state machine, time model, linear position interpolation, STOMP event model, REST API, persistence strategy, failure handling, and testing strategy.
+  - Backend simulation domain & state machine (`SimulationSession.java`, `SimulationStatus.java`, `SimVehicleStatus.java`, `SimulationSessionRepository.java`).
+  - `SimulationService.java` — Thread-safe simulation manager executing a `ScheduledExecutorService` (250ms tick rate), simulated clock advancement (08:00 AM start), configurable speed multipliers (`1x`, `2x`, `5x`), linear coordinate interpolation along Haversine route segments (30 km/h urban speed assumption), stop arrival detection, 10 min service duration execution, order `DELIVERED` status transitions, SLA lateness window checks, and STOMP event broadcasting over `/topic/simulation/{simulationId}`.
+  - `SimulationController.java` — REST API (`POST /api/v1/simulations`, `/start`, `/pause`, `/resume`, `/stop`, `GET /{id}`).
+  - `useSimulation.ts` & `simulationApi.ts` — React custom hook handling session lifecycle and subscribing to WebSocket events over STOMP.
+  - `SimulationView.tsx` — Real-Time Delivery Simulator Control Center view featuring control panel bar, speed selector toggle, live KPI strip, activity log ticker, moving truck markers on Leaflet map (`MapView.tsx`), and completion summary modal.
+  - Verification: `SimulationServiceTest.java` passes cleanly; `npx tsc --noEmit` returns 0 errors; `npm run build` succeeds in 3.60s (1749 modules); `mvn test` passes cleanly with 0 failures across 37 backend tests.
+
+---
+
+### Checkpoint 9: Incident Recovery & Dynamic Re-Optimization
+- **Status**: COMPLETED
+- **Date**: 2026-08-12
+- **Deliverables**:
+  - `docs/checkpoint-9-plan.md` & `implementation_plan.md` created detailing problem, incident lifecycle state machine, impact analyzer strategy, completed stop preservation, Timefold sub-plan re-optimization, route versioning, STOMP event model, REST API, persistence, concurrency protection, and testing.
+  - `IncidentImpactAnalyzer.java` — Inspects route state, splits stops into completed vs undelivered, preserves completed deliveries on broken route, extracts affected orders, and selects available candidate replacement vehicles (checking status, remaining capacity, driver shift hours, and simulated coordinates).
+  - `IncidentRecoveryService.java` — Executes Timefold solver sub-plan re-optimization for affected orders and candidate vehicles, increments route version (e.g. Version 2), marks broken vehicle as `BREAKDOWN` and original route as `REOPTIMIZED`, updates active `SimulationService` session, and broadcasts STOMP events over `/topic/incidents/{incidentId}` and `/topic/simulation/{simulationId}`.
+  - `IncidentController.java` — REST endpoints (`POST /api/v1/incidents`, `GET`, `POST /{id}/analyze`, `POST /{id}/recover`).
+  - `IncidentsView.tsx` & `incidentApi.ts` — Upgraded Incidents view with Recovery Inspector Drawer, impact analysis summary, and one-click **Execute Dynamic Timefold Recovery** button.
+  - `SimulationView.tsx` — Added **Simulate Breakdown** button for fast recruiter demo execution, displaying live alert banner and updating map polylines without page refresh.
+  - Verification: `IncidentRecoveryServiceTest.java` unit test suite passes cleanly; `npx tsc --noEmit` returns 0 errors; `npm run build` succeeds in 3.94s (1749 modules); `mvn test` passes cleanly with 0 failures across 39 backend tests.
+
+---
+
+### Checkpoint 10: Unified Real-Time Event Platform
+- **Status**: COMPLETED
+- **Date**: 2026-08-12
+- **Deliverables**:
+  - `docs/checkpoint-10-plan.md` & `implementation_plan.md` created detailing problem, current WebSocket architecture audit, unified event envelope, strongly typed event types, topic hierarchy, single STOMP connection, exponential backoff reconnection, deduplication cache, sequence ordering checks, REST resynchronization, and cross-view reactive synchronization.
+  - Backend real-time layer: `RealtimeEventType.java` (enum covering Optimization, Simulation, Vehicle, Route, Order, Incident & Recovery events), `RealtimeEvent.java` (unified envelope DTO with `eventId`, `eventType`, `entityType`, `entityId`, `occurredAt`, `sequence`, `simulationId`, `incidentId`, `optimizationRunId`, `payload`), and `RealtimeEventPublisher.java` (Spring service for wrapping and broadcasting events to specific channels while mirroring business events to `/topic/operations`).
+  - Frontend real-time architecture: `realtime.ts` (TypeScript types), `RealtimeContext.tsx` (`RealtimeProvider` & `useRealtime` hook managing single STOMP connection over SockJS `/ws`, exponential backoff delays up to 30s, 500 event ID LRU deduplication cache, sequence checks, and `registerResyncHandler()` for REST state resync), `Header.tsx` connection status badge indicator (`● LIVE`, `● RECONNECTING`, `● OFFLINE`), and `App.tsx` global operations subscription `/topic/operations`.
+  - Verification: `RealtimeEventTest.java` unit test suite passes cleanly; `npx tsc --noEmit` returns 0 errors; `npm run build` succeeds in 3.75s (1750 modules); `mvn test` passes cleanly with 0 failures across 41 backend tests.
 
 ---
 
 ## Active & Upcoming Checkpoints
 
-- **Checkpoint 8**: Real-Time Delivery Simulation Engine *(Next Up)*
-- **Checkpoint 9**: Incident Recovery & Dynamic Re-Optimization
-- **Checkpoint 10**: Real-Time WebSocket STOMP Push Integration
-- **Checkpoint 11**: Analytics & Performance Metrics Dashboard
+- **Checkpoint 11**: Analytics & Performance Metrics Dashboard *(Next Up)*
 - **Checkpoint 12**: Test Suite & Benchmark Suite Completion
 - **Checkpoint 13**: Observability & Micrometer Actuator Configuration
 - **Checkpoint 14**: Containerized Docker Deployment Packaging

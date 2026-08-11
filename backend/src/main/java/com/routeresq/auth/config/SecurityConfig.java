@@ -105,7 +105,7 @@ public class SecurityConfig {
 
                         // Dispatcher & Admin Endpoints
                         .requestMatchers("/api/v1/optimization/**", "/api/v1/simulation/**").hasAnyRole("ADMIN", "DISPATCHER")
-                        .requestMatchers(HttpMethod.POST, "/api/v1/incidents/**").hasAnyRole("ADMIN", "DISPATCHER", "DRIVER")
+                        .requestMatchers("/api/v1/incidents/**").hasAnyRole("ADMIN", "DISPATCHER", "DRIVER")
 
                         // Fleet & Orders Endpoints
                         .requestMatchers("/api/v1/orders/**", "/api/v1/vehicles/**", "/api/v1/drivers/**", "/api/v1/routes/**")

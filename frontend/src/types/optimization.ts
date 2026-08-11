@@ -1,6 +1,6 @@
 import { RouteStatus } from './domain';
 
-export type SolverStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'INFEASIBLE';
+export type SolverStatus = 'PENDING' | 'RUNNING' | 'SOLVING' | 'COMPLETED' | 'FEASIBLE' | 'FAILED' | 'CANCELLED' | 'INFEASIBLE';
 
 export interface ScoreDto {
   hard: number;

@@ -35,6 +35,8 @@ import com.routeresq.shared.exception.ResourceNotFoundException;
 import com.routeresq.shared.util.GeometryUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -61,6 +63,7 @@ public class OptimizationService {
     private final RouteStopRepository routeStopRepository;
     private final OptimizationRunRepository optimizationRunRepository;
     private final OptimizationEngine optimizationEngine;
+    private final SimpMessagingTemplate messagingTemplate;
 
     public OptimizationService(DepotRepository depotRepository,
                                OrderRepository orderRepository,
@@ -68,7 +71,8 @@ public class OptimizationService {
                                RouteRepository routeRepository,
                                RouteStopRepository routeStopRepository,
                                OptimizationRunRepository optimizationRunRepository,
-                               OptimizationEngine optimizationEngine) {
+                               OptimizationEngine optimizationEngine,
+                               SimpMessagingTemplate messagingTemplate) {
         this.depotRepository = depotRepository;
         this.orderRepository = orderRepository;
         this.vehicleRepository = vehicleRepository;
@@ -76,16 +80,20 @@ public class OptimizationService {
         this.routeStopRepository = routeStopRepository;
         this.optimizationRunRepository = optimizationRunRepository;
         this.optimizationEngine = optimizationEngine;
+        this.messagingTemplate = messagingTemplate;
     }
 
+    /**
+     * Synchronously validates the request, creates an OptimizationRun record,
+     * then kicks off the solver asynchronously. Returns the run ID immediately
+     * so the client can subscribe to WebSocket topic /topic/optimization/{runId}.
+     */
     @Transactional
-    public OptimizationRunResponse runOptimization(OptimizationRunRequest request) {
-        Instant startTime = Instant.now();
-
+    public OptimizationRunResponse startOptimization(OptimizationRunRequest request) {
         Depot depot = depotRepository.findById(request.getDepotId())
                 .orElseThrow(() -> new ResourceNotFoundException("Depot", request.getDepotId()));
 
-        // 1. Fetch Orders
+        // Fetch orders & vehicles early to check feasibility
         List<Order> orders;
         if (request.getOrderIds() != null && !request.getOrderIds().isEmpty()) {
             orders = orderRepository.findAllById(request.getOrderIds());
@@ -93,7 +101,6 @@ public class OptimizationService {
             orders = orderRepository.findByDepotIdAndStatus(depot.getId(), OrderStatus.UNASSIGNED);
         }
 
-        // 2. Fetch Vehicles
         List<Vehicle> vehicles;
         if (request.getVehicleIds() != null && !request.getVehicleIds().isEmpty()) {
             vehicles = vehicleRepository.findAllById(request.getVehicleIds());
@@ -101,186 +108,243 @@ public class OptimizationService {
             vehicles = vehicleRepository.findByDepotId(depot.getId());
         }
 
-        // Initialize OptimizationRun record
+        // Create PENDING run record
         OptimizationRun run = optimizationRunRepository.save(OptimizationRun.builder()
                 .runType(OptimizationRunType.INITIAL)
                 .solverStatus(SolverStatus.SOLVING)
                 .build());
 
-        // Check early infeasibility
+        // Quick feasibility checks before spawning thread
         if (vehicles.isEmpty()) {
-            return handleInfeasibleRun(run, "No available vehicles at depot " + depot.getName(), startTime, orders.size());
+            OptimizationRunResponse resp = handleInfeasibleRun(run,
+                    "No available vehicles at depot " + depot.getName(),
+                    Instant.now(), orders.size());
+            push(run.getId(), resp);
+            return resp;
         }
         if (orders.isEmpty()) {
-            return handleEmptyRun(run, startTime);
+            OptimizationRunResponse resp = handleEmptyRun(run, Instant.now());
+            push(run.getId(), resp);
+            return resp;
         }
 
         double totalWeight = orders.stream().mapToDouble(o -> o.getWeightKg().doubleValue()).sum();
         double totalCapacity = vehicles.stream().mapToDouble(v -> v.getMaxWeightKg().doubleValue()).sum();
-
         if (totalWeight > totalCapacity) {
-            String msg = String.format("Total order demand (%.2f kg) exceeds total fleet capacity (%.2f kg)", totalWeight, totalCapacity);
-            return handleInfeasibleRun(run, msg, startTime, orders.size());
+            String msg = String.format(
+                    "Total order demand (%.2f kg) exceeds total fleet capacity (%.2f kg)",
+                    totalWeight, totalCapacity);
+            OptimizationRunResponse resp = handleInfeasibleRun(run, msg, Instant.now(), orders.size());
+            push(run.getId(), resp);
+            return resp;
         }
 
-        // 3. Solve via OptimizationEngine
-        int solveSeconds = request.getMaxSolveSeconds() != null ? request.getMaxSolveSeconds() : 10;
-        RoutePlanSolution bestSolution = optimizationEngine.solve(depot, vehicles, orders, solveSeconds);
-
-        Instant completedTime = Instant.now();
-        long durationMs = Duration.between(startTime, completedTime).toMillis();
-
-        HardSoftScore score = bestSolution.getScore();
-        int hardScore = score != null ? score.hardScore() : 0;
-        int softScore = score != null ? score.softScore() : 0;
-
-        if (hardScore < 0) {
-            return handleInfeasibleRun(run, "Solver returned infeasible score: " + hardScore + " hard", startTime, orders.size());
-        }
-
-        RoutingProvider routingProvider = optimizationEngine.getRoutingProvider();
-        DistanceMatrix distanceMatrix = bestSolution.getDistanceMatrix();
-
-        // Reconstruct next customer map from previousStandstill links
-        Map<Standstill, TimefoldCustomer> nextMap = new HashMap<>();
-        for (TimefoldCustomer c : bestSolution.getCustomerList()) {
-            if (c.getPreviousStandstill() != null) {
-                nextMap.put(c.getPreviousStandstill(), c);
-            }
-        }
-
-        Map<UUID, Order> orderMap = orders.stream().collect(Collectors.toMap(Order::getId, o -> o));
-        Map<UUID, Vehicle> vehicleMap = vehicles.stream().collect(Collectors.toMap(Vehicle::getId, v -> v));
-
-        // 4. Persist Feasible Solution
-        List<RouteResultDto> routeResults = new ArrayList<>();
-        int vehiclesUsed = 0;
-        int ordersAssigned = 0;
-        double totalDistanceMeters = 0.0;
-        int totalDurationMinutes = 0;
-
-        for (TimefoldVehicle tfVehicle : bestSolution.getVehicleList()) {
-            TimefoldCustomer current = nextMap.get(tfVehicle);
-            if (current == null) {
-                continue; // Unused vehicle
-            }
-
-            vehiclesUsed++;
-            Vehicle vehicle = vehicleMap.get(tfVehicle.getId());
-
-            Route savedRoute = routeRepository.save(Route.builder()
-                    .optimizationRun(run)
-                    .vehicle(vehicle)
-                    .versionNumber(1)
-                    .status(RouteStatus.PLANNED)
-                    .build());
-            UUID routeId = savedRoute != null ? savedRoute.getId() : UUID.randomUUID();
-
-            List<StopResultDto> stopResults = new ArrayList<>();
-            int sequence = 1;
-            Standstill prev = tfVehicle;
-            double routeDistanceMeters = 0.0;
-            int routeDurationMinutes = 0;
-
-            while (current != null) {
-                ordersAssigned++;
-                Order order = orderMap.get(current.getId());
-                order.setStatus(OrderStatus.ASSIGNED);
-                orderRepository.save(order);
-
-                double legDist = GeometryUtils.haversineMeters(prev.getLocation(), current.getLocation());
-                int legTime = routingProvider.getTravelTimeMinutes(prev.getLocation(), current.getLocation());
-
-                routeDistanceMeters += legDist;
-                routeDurationMinutes += legTime;
-
-                Integer arrivalVal = current.getArrivalTimeMinutes(distanceMatrix);
-                int arrival = arrivalVal != null ? arrivalVal : 540;
-                int departure = arrival + current.getServiceDurationMinutes();
-
-                RouteStop savedStop = routeStopRepository.save(RouteStop.builder()
-                        .route(savedRoute)
-                        .order(order)
-                        .sequenceNumber(sequence)
-                        .estimatedArrivalMinutes(arrival)
-                        .estimatedDepartureMinutes(departure)
-                        .stopStatus(StopStatus.PENDING)
-                        .build());
-                UUID stopId = savedStop != null ? savedStop.getId() : UUID.randomUUID();
-
-                stopResults.add(new StopResultDto(
-                        stopId,
-                        order.getId(),
-                        order.getOrderNumber(),
-                        order.getCustomerName(),
-                        sequence,
-                        arrival,
-                        departure
-                ));
-
-                sequence++;
-                prev = current;
-                current = nextMap.get(current);
-            }
-
-            // Return to depot leg
-            routeDistanceMeters += GeometryUtils.haversineMeters(prev.getLocation(), depot.getLocation());
-            routeDurationMinutes += routingProvider.getTravelTimeMinutes(prev.getLocation(), depot.getLocation());
-
-            totalDistanceMeters += routeDistanceMeters;
-            totalDurationMinutes += routeDurationMinutes;
-
-            BigDecimal routeDistanceKm = new BigDecimal(routeDistanceMeters / 1000.0).setScale(2, RoundingMode.HALF_UP);
-            if (savedRoute != null) {
-                savedRoute.setTotalDistanceKm(routeDistanceKm);
-                savedRoute.setTotalDurationMinutes(routeDurationMinutes);
-                routeRepository.save(savedRoute);
-            }
-
-            routeResults.add(new RouteResultDto(
-                    routeId,
-                    vehicle.getId(),
-                    vehicle.getVehicleCode(),
-                    vehicle.getDriver() != null ? vehicle.getDriver().getId() : null,
-                    vehicle.getDriver() != null ? vehicle.getDriver().getName() : null,
-                    RouteStatus.PLANNED,
-                    (int) Math.round(routeDistanceMeters),
-                    routeDurationMinutes,
-                    stopResults
-            ));
-        }
-
-        // Update OptimizationRun
-        run.setSolverStatus(SolverStatus.FEASIBLE);
-        run.setHardScore(hardScore);
-        run.setSoftScore(softScore);
-        run.setExecutionDurationMs((int) durationMs);
-        run.setTotalDistanceKm(new BigDecimal(totalDistanceMeters / 1000.0).setScale(2, RoundingMode.HALF_UP));
-        run.setTotalDurationMinutes(totalDurationMinutes);
-        optimizationRunRepository.save(run);
-
-        double totalDistanceKm = totalDistanceMeters / 1000.0;
-        int unassignedCount = orders.size() - ordersAssigned;
-
-        OptimizationMetricsDto metrics = new OptimizationMetricsDto(
-                Math.round(totalDistanceKm * 100.0) / 100.0,
-                totalDurationMinutes,
-                vehiclesUsed,
-                ordersAssigned,
-                unassignedCount
-        );
+        // Launch solver asynchronously — client polls or listens on WebSocket
+        solveAsync(run.getId(), request);
 
         return new OptimizationRunResponse(
                 run.getId(),
-                SolverStatus.FEASIBLE,
+                SolverStatus.SOLVING,
                 null,
-                new ScoreDto(hardScore, softScore),
-                metrics,
-                routeResults,
-                startTime,
-                completedTime,
-                durationMs
+                null,
+                null,
+                List.of(),
+                Instant.now(),
+                null,
+                0L
         );
+    }
+
+    /**
+     * Runs the actual Timefold solver on the dedicated executor thread.
+     * On completion (success or failure) broadcasts the result via WebSocket.
+     */
+    @Async("solverExecutor")
+    @Transactional
+    public void solveAsync(UUID runId, OptimizationRunRequest request) {
+        Instant startTime = Instant.now();
+
+        OptimizationRun run = optimizationRunRepository.findById(runId).orElse(null);
+        if (run == null) return;
+
+        try {
+            Depot depot = depotRepository.findById(request.getDepotId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Depot", request.getDepotId()));
+
+            List<Order> orders;
+            if (request.getOrderIds() != null && !request.getOrderIds().isEmpty()) {
+                orders = orderRepository.findAllById(request.getOrderIds());
+            } else {
+                orders = orderRepository.findByDepotIdAndStatus(depot.getId(), OrderStatus.UNASSIGNED);
+            }
+
+            List<Vehicle> vehicles;
+            if (request.getVehicleIds() != null && !request.getVehicleIds().isEmpty()) {
+                vehicles = vehicleRepository.findAllById(request.getVehicleIds());
+            } else {
+                vehicles = vehicleRepository.findByDepotId(depot.getId());
+            }
+
+            int solveSeconds = request.getMaxSolveSeconds() != null ? request.getMaxSolveSeconds() : 10;
+            RoutePlanSolution bestSolution = optimizationEngine.solve(depot, vehicles, orders, solveSeconds);
+
+            Instant completedTime = Instant.now();
+            long durationMs = Duration.between(startTime, completedTime).toMillis();
+
+            HardSoftScore score = bestSolution.getScore();
+            int hardScore = score != null ? score.hardScore() : 0;
+            int softScore = score != null ? score.softScore() : 0;
+
+            if (hardScore < 0) {
+                OptimizationRunResponse resp = handleInfeasibleRun(run,
+                        "Solver returned infeasible score: " + hardScore + " hard",
+                        startTime, orders.size());
+                push(runId, resp);
+                return;
+            }
+
+            RoutingProvider routingProvider = optimizationEngine.getRoutingProvider();
+            DistanceMatrix distanceMatrix = bestSolution.getDistanceMatrix();
+
+            // Reconstruct next-customer map from linked-list chain
+            Map<Standstill, TimefoldCustomer> nextMap = new HashMap<>();
+            for (TimefoldCustomer c : bestSolution.getCustomerList()) {
+                if (c.getPreviousStandstill() != null) {
+                    nextMap.put(c.getPreviousStandstill(), c);
+                }
+            }
+
+            Map<UUID, Order> orderMap = orders.stream()
+                    .collect(Collectors.toMap(Order::getId, o -> o));
+            Map<UUID, Vehicle> vehicleMap = vehicles.stream()
+                    .collect(Collectors.toMap(Vehicle::getId, v -> v));
+
+            List<RouteResultDto> routeResults = new ArrayList<>();
+            int vehiclesUsed = 0;
+            int ordersAssigned = 0;
+            double totalDistanceMeters = 0.0;
+            int totalDurationMinutes = 0;
+
+            for (TimefoldVehicle tfVehicle : bestSolution.getVehicleList()) {
+                TimefoldCustomer current = nextMap.get(tfVehicle);
+                if (current == null) continue;
+
+                vehiclesUsed++;
+                Vehicle vehicle = vehicleMap.get(tfVehicle.getId());
+
+                Route savedRoute = routeRepository.save(Route.builder()
+                        .optimizationRun(run)
+                        .vehicle(vehicle)
+                        .versionNumber(1)
+                        .status(RouteStatus.PLANNED)
+                        .build());
+                UUID routeId = savedRoute != null ? savedRoute.getId() : UUID.randomUUID();
+
+                List<StopResultDto> stopResults = new ArrayList<>();
+                int sequence = 1;
+                Standstill prev = tfVehicle;
+                double routeDistanceMeters = 0.0;
+                int routeDurationMinutes = 0;
+
+                while (current != null) {
+                    ordersAssigned++;
+                    Order order = orderMap.get(current.getId());
+                    order.setStatus(OrderStatus.ASSIGNED);
+                    orderRepository.save(order);
+
+                    double legDist = GeometryUtils.haversineMeters(prev.getLocation(), current.getLocation());
+                    int legTime = routingProvider.getTravelTimeMinutes(prev.getLocation(), current.getLocation());
+
+                    routeDistanceMeters += legDist;
+                    routeDurationMinutes += legTime;
+
+                    Integer arrivalVal = current.getArrivalTimeMinutes(distanceMatrix);
+                    int arrival = arrivalVal != null ? arrivalVal : 540;
+                    int departure = arrival + current.getServiceDurationMinutes();
+
+                    RouteStop savedStop = routeStopRepository.save(RouteStop.builder()
+                            .route(savedRoute)
+                            .order(order)
+                            .sequenceNumber(sequence)
+                            .estimatedArrivalMinutes(arrival)
+                            .estimatedDepartureMinutes(departure)
+                            .stopStatus(StopStatus.PENDING)
+                            .build());
+                    UUID stopId = savedStop != null ? savedStop.getId() : UUID.randomUUID();
+
+                    stopResults.add(new StopResultDto(
+                            stopId, order.getId(), order.getOrderNumber(),
+                            order.getCustomerName(), sequence, arrival, departure));
+
+                    sequence++;
+                    prev = current;
+                    current = nextMap.get(current);
+                }
+
+                // Return-to-depot leg
+                routeDistanceMeters += GeometryUtils.haversineMeters(prev.getLocation(), depot.getLocation());
+                routeDurationMinutes += routingProvider.getTravelTimeMinutes(prev.getLocation(), depot.getLocation());
+
+                totalDistanceMeters += routeDistanceMeters;
+                totalDurationMinutes += routeDurationMinutes;
+
+                BigDecimal routeDistanceKm = new BigDecimal(routeDistanceMeters / 1000.0)
+                        .setScale(2, RoundingMode.HALF_UP);
+                if (savedRoute != null) {
+                    savedRoute.setTotalDistanceKm(routeDistanceKm);
+                    savedRoute.setTotalDurationMinutes(routeDurationMinutes);
+                    routeRepository.save(savedRoute);
+                }
+
+                routeResults.add(new RouteResultDto(
+                        routeId, vehicle.getId(), vehicle.getVehicleCode(),
+                        vehicle.getDriver() != null ? vehicle.getDriver().getId() : null,
+                        vehicle.getDriver() != null ? vehicle.getDriver().getName() : null,
+                        RouteStatus.PLANNED,
+                        (int) Math.round(routeDistanceMeters),
+                        routeDurationMinutes,
+                        stopResults));
+            }
+
+            run.setSolverStatus(SolverStatus.FEASIBLE);
+            run.setHardScore(hardScore);
+            run.setSoftScore(softScore);
+            run.setExecutionDurationMs((int) durationMs);
+            run.setTotalDistanceKm(new BigDecimal(totalDistanceMeters / 1000.0).setScale(2, RoundingMode.HALF_UP));
+            run.setTotalDurationMinutes(totalDurationMinutes);
+            optimizationRunRepository.save(run);
+
+            int unassignedCount = orders.size() - ordersAssigned;
+            OptimizationMetricsDto metrics = new OptimizationMetricsDto(
+                    Math.round(totalDistanceMeters / 10.0) / 100.0,
+                    totalDurationMinutes, vehiclesUsed, ordersAssigned, unassignedCount);
+
+            OptimizationRunResponse result = new OptimizationRunResponse(
+                    run.getId(), SolverStatus.FEASIBLE, null,
+                    new ScoreDto(hardScore, softScore), metrics,
+                    routeResults, startTime, completedTime, durationMs);
+
+            push(runId, result);
+
+        } catch (Exception ex) {
+            log.error("Async solver failed for run {}: {}", runId, ex.getMessage(), ex);
+            if (run != null) {
+                run.setSolverStatus(SolverStatus.FAILED);
+                optimizationRunRepository.save(run);
+            }
+            OptimizationRunResponse errResp = new OptimizationRunResponse(
+                    runId, SolverStatus.FAILED, ex.getMessage(),
+                    new ScoreDto(-9999, -9999),
+                    new OptimizationMetricsDto(0, 0, 0, 0, 0),
+                    List.of(), startTime, Instant.now(),
+                    Duration.between(startTime, Instant.now()).toMillis());
+            push(runId, errResp);
+        }
+    }
+
+    /** Push result to WebSocket topic for real-time frontend updates. */
+    private void push(UUID runId, OptimizationRunResponse result) {
+        messagingTemplate.convertAndSend("/topic/optimization/" + runId, result);
     }
 
     @Transactional(readOnly = true)
@@ -292,8 +356,13 @@ public class OptimizationService {
                 run.getId(),
                 run.getSolverStatus(),
                 null,
-                new ScoreDto(run.getHardScore() != null ? run.getHardScore() : 0, run.getSoftScore() != null ? run.getSoftScore() : 0),
-                new OptimizationMetricsDto(run.getTotalDistanceKm() != null ? run.getTotalDistanceKm().doubleValue() : 0.0, run.getTotalDurationMinutes() != null ? run.getTotalDurationMinutes() : 0, 0, 0, 0),
+                new ScoreDto(
+                        run.getHardScore() != null ? run.getHardScore() : 0,
+                        run.getSoftScore() != null ? run.getSoftScore() : 0),
+                new OptimizationMetricsDto(
+                        run.getTotalDistanceKm() != null ? run.getTotalDistanceKm().doubleValue() : 0.0,
+                        run.getTotalDurationMinutes() != null ? run.getTotalDurationMinutes() : 0,
+                        0, 0, 0),
                 List.of(),
                 run.getCreatedAt(),
                 run.getUpdatedAt(),
@@ -301,47 +370,32 @@ public class OptimizationService {
         );
     }
 
-    private OptimizationRunResponse handleInfeasibleRun(OptimizationRun run, String reason, Instant startTime, int ordersCount) {
+    private OptimizationRunResponse handleInfeasibleRun(OptimizationRun run, String reason,
+                                                         Instant startTime, int ordersCount) {
         Instant completedTime = Instant.now();
         long durationMs = Duration.between(startTime, completedTime).toMillis();
-
         run.setSolverStatus(SolverStatus.FAILED);
         run.setExecutionDurationMs((int) durationMs);
         optimizationRunRepository.save(run);
-
         return new OptimizationRunResponse(
-                run.getId(),
-                SolverStatus.FAILED,
-                reason,
+                run.getId(), SolverStatus.FAILED, reason,
                 new ScoreDto(-9999, -9999),
                 new OptimizationMetricsDto(0.0, 0, 0, 0, ordersCount),
-                List.of(),
-                startTime,
-                completedTime,
-                durationMs
-        );
+                List.of(), startTime, completedTime, durationMs);
     }
 
     private OptimizationRunResponse handleEmptyRun(OptimizationRun run, Instant startTime) {
         Instant completedTime = Instant.now();
         long durationMs = Duration.between(startTime, completedTime).toMillis();
-
         run.setSolverStatus(SolverStatus.FEASIBLE);
         run.setHardScore(0);
         run.setSoftScore(0);
         run.setExecutionDurationMs((int) durationMs);
         optimizationRunRepository.save(run);
-
         return new OptimizationRunResponse(
-                run.getId(),
-                SolverStatus.FEASIBLE,
-                null,
+                run.getId(), SolverStatus.FEASIBLE, null,
                 new ScoreDto(0, 0),
                 new OptimizationMetricsDto(0.0, 0, 0, 0, 0),
-                List.of(),
-                startTime,
-                completedTime,
-                durationMs
-        );
+                List.of(), startTime, completedTime, durationMs);
     }
 }

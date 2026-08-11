@@ -25,10 +25,19 @@ public class OptimizationController {
         this.optimizationService = optimizationService;
     }
 
+    /**
+     * POST /api/v1/optimization/runs
+     *
+     * Returns 202 Accepted immediately with a run ID (status = SOLVING).
+     * The client should either:
+     *   a) Subscribe to WebSocket topic /topic/optimization/{runId}, or
+     *   b) Poll GET /api/v1/optimization/runs/{id} every 2 seconds.
+     */
     @PostMapping("/runs")
-    public ResponseEntity<OptimizationRunResponse> runOptimization(@Valid @RequestBody OptimizationRunRequest request) {
-        OptimizationRunResponse response = optimizationService.runOptimization(request);
-        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    public ResponseEntity<OptimizationRunResponse> startOptimization(
+            @Valid @RequestBody OptimizationRunRequest request) {
+        OptimizationRunResponse response = optimizationService.startOptimization(request);
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
     }
 
     @GetMapping("/runs/{id}")

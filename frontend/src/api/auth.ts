@@ -9,6 +9,7 @@ export const apiClient = axios.create({
   },
 });
 
+// ── Request interceptor: attach JWT ────────────────────────
 apiClient.interceptors.request.use(
   (config) => {
     const token = tokenStorage.getToken();
@@ -18,6 +19,19 @@ apiClient.interceptors.request.use(
     return config;
   },
   (error) => Promise.reject(error)
+);
+
+// ── Response interceptor: handle token expiry ──────────────
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error?.response?.status === 401) {
+      tokenStorage.clear();
+      // Trigger re-render of auth guard by dispatching a storage event
+      window.dispatchEvent(new Event('routeresq:logout'));
+    }
+    return Promise.reject(error);
+  }
 );
 
 export const authApi = {
@@ -32,5 +46,7 @@ export const authApi = {
 
   logout(): void {
     tokenStorage.clear();
+    window.dispatchEvent(new Event('routeresq:logout'));
   },
 };
+

@@ -25,12 +25,30 @@
 - `PATCH /api/v1/vehicles/{id}`: Updates vehicle status (e.g. `BREAKDOWN`).
 
 ### 2.4 Optimization Engine (`/api/v1/optimization`)
-- `POST /api/v1/optimization/runs`: Initiates a new route optimization job.
+- `POST /api/v1/optimization/runs`: Initiates a new async route optimization job (returns `202 Accepted` + `optimizationRunId`).
 - `GET /api/v1/optimization/runs/{id}`: Polling endpoint for optimization status & metrics.
-- `POST /api/v1/optimization/baseline`: Generates Nearest-Neighbor baseline comparison run.
+- `POST /api/v1/optimization/benchmarks`: Runs 6 VRPTW benchmark datasets comparing Timefold vs Baseline.
 
 ### 2.5 Incident & Recovery (`/api/v1/incidents`)
-- `POST /api/v1/incidents`: Triggers operational incident (`VEHICLE_BREAKDOWN`, `URGENT_ORDER`) and executes automatic sub-plan re-optimization.
+- `GET /api/v1/incidents`: Lists reported operational disruptions (filtered by `type` and `status`).
+- `POST /api/v1/incidents`: Reports an operational incident (`VEHICLE_BREAKDOWN`, `TRAFFIC_DELAY`, `DRIVER_UNAVAILABLE`, `URGENT_ORDER`, `ORDER_CANCELLED`, `DEADLINE_CHANGED`).
+- `GET /api/v1/incidents/{id}`: Returns incident details.
+- `POST /api/v1/incidents/{id}/analyze`: Performs automated impact analysis (preserves completed stops, identifies affected orders and candidate replacement vehicles).
+- `POST /api/v1/incidents/{id}/recover`: Executes Timefold sub-plan re-optimization, creates versioned replacement route, updates active simulation, and broadcasts STOMP updates.
+
+### 2.6 Real-Time Simulation Engine (`/api/v1/simulations`)
+- `POST /api/v1/simulations`: Creates a new simulation session from `optimizationRunId` and `speedMultiplier`.
+- `POST /api/v1/simulations/{id}/start`: Launches scheduled simulation tick loop.
+- `POST /api/v1/simulations/{id}/pause`: Pauses active simulation.
+- `POST /api/v1/simulations/{id}/resume`: Resumes paused simulation.
+- `POST /api/v1/simulations/{id}/stop`: Manually terminates simulation.
+- `GET /api/v1/simulations/{id}`: Returns current simulation state snapshot and vehicle states.
+
+### 2.7 STOMP Real-Time WebSocket Topics (`/ws`)
+- `/topic/operations`: Global operations stream for high-level business events (`ORDER_DELIVERED`, `ROUTE_REPLANNED`, `VEHICLE_STATUS_CHANGED`, `INCIDENT_CREATED`, `RECOVERY_COMPLETED`).
+- `/topic/simulation/{simulationId}`: High-frequency vehicle positions & live activity log.
+- `/topic/optimization/{optimizationRunId}`: Live solver progress.
+- `/topic/incidents/{incidentId}`: Dynamic recovery status.
 
 ---
 

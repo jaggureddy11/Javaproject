@@ -166,6 +166,7 @@ public class DataSeeder implements CommandLineRunner {
                     .windowStartMinutes(window[0])
                     .windowEndMinutes(window[1])
                     .serviceDurationMinutes(10)
+                    .priority(1 + random.nextInt(5))
                     .status(OrderStatus.UNASSIGNED)
                     .build());
         }

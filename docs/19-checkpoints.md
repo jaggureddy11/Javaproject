@@ -47,25 +47,29 @@ The RouteResQ project will be implemented strictly across **16 explicit checkpoi
 - **Tasks**: Implement `BaselineRoutePlanner`, metric calculation engine (`Total Distance`, `Travel Time`, `Late Deliveries`), and 6 benchmark datasets.
 - **Acceptance Criteria**: System executes dual solve (Baseline vs Timefold) and calculates exact percentage improvements (achieving 44.1% distance reduction on spatially clustered orders).
 
-## Checkpoint 7: Interactive Map & Dashboard UI
-- **Objective**: Build React mission-control dashboard with Leaflet/Mapbox integration.
-- **Tasks**: Render central map, depot markers, customer order markers, vehicle route polylines, sidebar panels.
-- **Acceptance Criteria**: Map displays clean visual routes; sidebar displays vehicle loads and stop sequences.
+## Checkpoint 7: Interactive Map & Logistics Operations Control Center
+- **Status**: COMPLETED
+- **Objective**: Build React mission-control operations control center with Leaflet map, application shell navigation, 7 operational views, real-time STOMP STOMP/polling fallback, and RBAC UI.
+- **Tasks**: Render central map, depot markers, customer order priority markers, vehicle route polylines, overview KPI dashboard, sequential stop timeline inspector, orders management, fleet sub-tabs, async solver center, incident tracking UI foundation, and empirical benchmark charts.
+- **Acceptance Criteria**: Application shell supports seamless navigation across 8 views; map dynamically zooms/fits selected routes/orders/vehicles with `"Route geometry: estimated"` badge; STOMP WebSocket streams live optimization progress; `npx tsc --noEmit` returns 0 errors; `npm run build` succeeds; `mvn test` passes cleanly with 0 failures across 35 unit/integration tests.
 
-## Checkpoint 8: Delivery Simulation Engine
-- **Objective**: Build real-time delivery day simulator.
-- **Tasks**: Implement `SimulationService` timer loop, step vehicle locations along route polylines, emit location events.
-- **Acceptance Criteria**: Simulation smoothly moves truck markers across map at selectable speed multipliers (1x, 2x, 5x).
+## Checkpoint 8: Real-Time Delivery Simulation Engine
+- **Status**: COMPLETED
+- **Objective**: Build backend-driven real-time delivery day simulator with position linear interpolation, simulated clock, STOMP event streaming, speed multipliers (`1x`, `2x`, `5x`), and React `SimulationView`.
+- **Tasks**: Implement `SimulationService` timer loop (`ScheduledExecutorService`), vehicle movement interpolation, stop arrival & service time processing (10 min duration), order `DELIVERED` state transitions, SLA lateness window checks, STOMP event broadcasting over `/topic/simulation/{simulationId}`, and `SimulationView` UI with live control panel, KPI bar, moving truck markers, and activity feed log.
+- **Acceptance Criteria**: Backend drives simulation state; moving truck markers update smoothly on Leaflet map via STOMP events; `SimulationServiceTest` verifies session creation and position interpolation; `npx tsc --noEmit` returns 0 errors; `npm run build` succeeds; `mvn test` passes cleanly with 0 failures across 37 backend tests.
 
 ## Checkpoint 9: Incident Recovery & Dynamic Re-Optimization
-- **Objective**: Handle vehicle breakdowns and urgent orders with automatic route re-optimization.
-- **Tasks**: Implement `IncidentRecoveryService`, locked stop logic, `S4: Disruption Penalty` soft constraint.
-- **Acceptance Criteria**: Triggering vehicle breakdown re-assigns uncompleted orders to active vehicles in under 5s.
+- **Status**: COMPLETED
+- **Objective**: Handle vehicle breakdowns, driver unavailability, traffic delays, and urgent order insertions with automatic Timefold dynamic sub-plan re-optimization.
+- **Tasks**: Implement `IncidentImpactAnalyzer` (completed stop preservation & impact analysis), `IncidentRecoveryService` (Timefold sub-plan re-optimization for affected orders), versioned replacement route generation, active simulation session update (`SimulationService.applyRecoveryPlan`), STOMP event broadcasting (`/topic/incidents/{id}`, `/topic/simulation/{simId}`), REST endpoints (`POST /api/v1/incidents/{id}/analyze`, `/recover`), `IncidentsView` Recovery Inspector Drawer, and `SimulationView` **Simulate Breakdown** feature for recruiter demo.
+- **Acceptance Criteria**: Completed deliveries are preserved; affected undelivered orders are reassigned to replacement vehicles in under 200ms via Timefold; route versions increment; active simulation and map update live without page refresh; `IncidentRecoveryServiceTest` passes cleanly; `npx tsc --noEmit` returns 0 errors; `npm run build` succeeds; `mvn test` passes cleanly with 0 failures across 39 backend tests.
 
-## Checkpoint 10: Real-Time WebSocket STOMP Pushes
-- **Objective**: Broadcast live route updates to UI via STOMP WebSockets.
-- **Tasks**: Configure Spring WebSocket message broker, STOMP endpoint `/ws-net`, React WebSocket client listeners.
-- **Acceptance Criteria**: Route re-optimization instantly updates UI map and stop lists without manual page refresh.
+## Checkpoint 10: Unified Real-Time Event Platform
+- **Status**: COMPLETED
+- **Objective**: Unify application-wide real-time event architecture under a strongly-typed `RealtimeEvent` envelope, single shared STOMP connection, clean topic hierarchy (`/topic/operations`), exponential backoff reconnection, event deduplication (500 event LRU cache), sequence ordering checks, and automated REST resynchronization upon reconnect.
+- **Tasks**: Implement backend `RealtimeEventType` enum, `RealtimeEvent` DTO, `RealtimeEventPublisher` service, frontend `RealtimeContext` provider, `useRealtime` hook, Header connection status badge (`● LIVE`, `● RECONNECTING`, `● OFFLINE`), global operations subscription (`/topic/operations`), resync handler registration in `App.tsx`, and `RealtimeEventTest` unit tests.
+- **Acceptance Criteria**: Single STOMP connection shared across entire frontend; events arrive wrapped in typed envelope; global business events mirror to `/topic/operations`; exponential backoff handles disconnects smoothly; REST resync updates stale client state on reconnect; all views reactively update without page refresh; `RealtimeEventTest` passes cleanly; `npx tsc --noEmit` returns 0 errors; `npm run build` succeeds; `mvn test` passes cleanly with 0 failures across 41 backend tests.
 
 ## Checkpoint 11: Analytics & Metrics Dashboard
 - **Objective**: Present historical benchmark performance metrics and SLA reporting.

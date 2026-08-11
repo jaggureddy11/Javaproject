@@ -1,0 +1,36 @@
+package com.routeresq.realtime.model;
+
+public enum RealtimeEventType {
+    // Optimization
+    OPTIMIZATION_STARTED,
+    OPTIMIZATION_PROGRESS,
+    OPTIMIZATION_COMPLETED,
+    OPTIMIZATION_FAILED,
+
+    // Simulation Session
+    SIMULATION_STARTED,
+    SIMULATION_PAUSED,
+    SIMULATION_RESUMED,
+    SIMULATION_STOPPED,
+    SIMULATION_COMPLETED,
+
+    // Vehicle
+    VEHICLE_POSITION_UPDATED,
+    VEHICLE_STATUS_CHANGED,
+
+    // Route
+    ROUTE_UPDATED,
+    ROUTE_REPLANNED,
+
+    // Order
+    ORDER_STATUS_CHANGED,
+    ORDER_DELIVERED,
+    ORDER_REASSIGNED,
+
+    // Incident & Recovery
+    INCIDENT_CREATED,
+    INCIDENT_ANALYZED,
+    RECOVERY_STARTED,
+    RECOVERY_COMPLETED,
+    RECOVERY_FAILED
+}

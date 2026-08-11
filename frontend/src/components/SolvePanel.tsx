@@ -1,14 +1,17 @@
-// ─── Solve control panel (map overlay, top-right) ─────────
-import React, { useState, useEffect } from 'react';
-import { Play, Zap, ChevronDown } from 'lucide-react';
+// ─── Solve control panel ────────────────────────────────────
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, Zap, ChevronDown, Wifi, WifiOff } from 'lucide-react';
 import { depotApi } from '../api/depotApi';
 import { optimizationApi } from '../api/optimizationApi';
-import { OptimizationRunResponse } from '../types/optimization';
+import { OptimizationRunResponse, SolverStatus } from '../types/optimization';
 import { useToast } from '../context/ToastContext';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 interface SolvePanelProps {
   onResult: (result: OptimizationRunResponse) => void;
 }
+
+const TERMINAL: SolverStatus[] = ['FEASIBLE', 'COMPLETED', 'FAILED', 'CANCELLED', 'INFEASIBLE'];
 
 const SolvePanel: React.FC<SolvePanelProps> = ({ onResult }) => {
   const [depots, setDepots] = useState<{ id: string; name: string }[]>([]);
@@ -16,7 +19,16 @@ const SolvePanel: React.FC<SolvePanelProps> = ({ onResult }) => {
   const [maxSeconds, setMaxSeconds] = useState(10);
   const [loading, setLoading] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [wsConnected, setWsConnected] = useState(false);
   const { addToast } = useToast();
+
+  const stopPollRef = useRef<(() => void) | null>(null);
+  const unsubscribeRef = useRef<(() => void) | null>(null);
+
+  const { subscribe } = useWebSocket({
+    onConnect: () => setWsConnected(true),
+    onError: () => setWsConnected(false),
+  });
 
   useEffect(() => {
     depotApi.getAll({ size: 20 }).then(p => {
@@ -25,6 +37,7 @@ const SolvePanel: React.FC<SolvePanelProps> = ({ onResult }) => {
     }).catch(() => {});
   }, []);
 
+  // Elapsed-time ticker while solving
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | null = null;
     if (loading) {
@@ -34,33 +47,75 @@ const SolvePanel: React.FC<SolvePanelProps> = ({ onResult }) => {
     return () => { if (interval) clearInterval(interval); };
   }, [loading]);
 
-  const handleSolve = async () => {
-    if (!selectedDepot) { addToast('warning', 'Select a depot first'); return; }
-    setLoading(true);
-    try {
-      const result = await optimizationApi.run({
-        depotId: selectedDepot,
-        maxSolveSeconds: maxSeconds,
-      });
+  const handleFinished = (result: OptimizationRunResponse) => {
+    setLoading(false);
+    stopPollRef.current?.();
+    unsubscribeRef.current?.();
+    stopPollRef.current = null;
+    unsubscribeRef.current = null;
+
+    if (TERMINAL.includes(result.status) && result.routes && result.routes.length > 0) {
       onResult(result);
       const routes = result.routes?.length ?? 0;
       const dist = result.metrics?.totalDistanceKm?.toFixed(1) ?? '?';
       addToast('success', `Optimization complete — ${routes} routes, ${dist} km total`);
+    } else if (result.status === 'FAILED') {
+      addToast('error', result.failureReason ?? 'Optimization failed');
+    }
+  };
+
+  const handleSolve = async () => {
+    if (!selectedDepot) { addToast('warning', 'Select a depot first'); return; }
+    setLoading(true);
+
+    try {
+      const initial = await optimizationApi.start({
+        depotId: selectedDepot,
+        maxSolveSeconds: maxSeconds,
+      });
+
+      // If result is already terminal (immediate infeasibility), finish right away
+      if (TERMINAL.includes(initial.status)) {
+        handleFinished(initial);
+        return;
+      }
+
+      const runId = initial.optimizationRunId;
+
+      // Try WebSocket first
+      unsubscribeRef.current = subscribe(
+        `/topic/optimization/${runId}`,
+        (payload) => handleFinished(payload as OptimizationRunResponse)
+      );
+
+      // Always start polling as fallback (stops itself when WS fires)
+      stopPollRef.current = optimizationApi.pollUntilDone(runId, (run) => {
+        if (TERMINAL.includes(run.status) && run.routes && run.routes.length > 0) {
+          handleFinished(run);
+        }
+      });
+
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Optimization failed';
+      const msg = (err as { response?: { data?: { message?: string } } })
+        ?.response?.data?.message ?? 'Failed to start optimization';
       addToast('error', msg);
-    } finally {
       setLoading(false);
     }
   };
 
-  const progress = loading ? Math.min((elapsed / maxSeconds) * 100, 95) : 0;
+  const progress = loading ? Math.min((elapsed / maxSeconds) * 100, 92) : 0;
 
   return (
     <div className="solve-panel map-overlay-content">
       <h3 style={{ fontSize: 13 }}>
         <Zap size={13} style={{ color: 'var(--accent-blue)' }} />
         VRPTW Optimizer
+        {/* WebSocket status indicator */}
+        <span style={{ marginLeft: 'auto' }} title={wsConnected ? 'Real-time connected' : 'Polling mode'}>
+          {wsConnected
+            ? <Wifi size={11} style={{ color: 'var(--accent-green)', opacity: 0.8 }} />
+            : <WifiOff size={11} style={{ color: 'var(--text-dim)', opacity: 0.6 }} />}
+        </span>
       </h3>
 
       <div className="form-group">
@@ -105,8 +160,11 @@ const SolvePanel: React.FC<SolvePanelProps> = ({ onResult }) => {
           <div className="progress-bar">
             <div className="progress-fill" style={{ width: `${progress}%` }} />
           </div>
-          <p style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 5, textAlign: 'center', fontFamily: 'JetBrains Mono, monospace' }}>
-            Solving… {elapsed}s / {maxSeconds}s
+          <p style={{
+            fontSize: 10, color: 'var(--text-muted)', marginTop: 5,
+            textAlign: 'center', fontFamily: 'JetBrains Mono, monospace',
+          }}>
+            {wsConnected ? '⚡ Live · ' : ''}Solving… {elapsed}s / {maxSeconds}s
           </p>
         </div>
       )}
